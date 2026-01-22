@@ -582,14 +582,10 @@ class AkshareFetcher(BaseFetcher):
     
     def _get_stock_realtime_quote(self, stock_code: str) -> Optional[RealtimeQuote]:
         """
-        获取普通 A 股实时行情数据（增强版：添加 Tushare fallback）
+        获取普通 A 股实时行情数据（新浪财经 fallback 版）
+        优先 AKShare 东财 → 失败则用 ak.stock_zh_a_spot() 新浪源
         """
         import akshare as ak
-        import tushare as ts
-        from config import get_config  # 确保能读取 TUSHARE_TOKEN
-
-        config = get_config()
-        tushare_token = config.tushare_token or os.getenv("TUSHARE_TOKEN")
 
         df = None
         source = "AKShare"
@@ -604,48 +600,32 @@ class AkshareFetcher(BaseFetcher):
             api_elapsed = time.time() - api_start
             logger.info(f"[API返回] ak.stock_zh_a_spot_em 成功: 返回 {len(df)} 只股票, 耗时 {api_elapsed:.2f}s")
         except Exception as e:
-            logger.warning(f"[AKShare 实时行情失败] {e}")
+            logger.warning(f"[AKShare 东财失败] {e}")
 
-        # 步骤2: 如果 AKShare 失败，且有 Tushare Token，则 fallback
-        if (df is None or df.empty) and tushare_token:
-            source = "Tushare (fallback)"
+        # 步骤2: AKShare 失败 → fallback 到新浪财经（ak.stock_zh_a_spot）
+        if (df is None or df.empty):
+            source = "新浪财经 (fallback)"
             try:
-                logger.info(f"[Fallback] 切换到 Tushare 获取实时行情")
-                pro = ts.pro_api(tushare_token)
-                # Tushare daily_basic：提供最新交易日的估值和换手率（非严格盘中实时，但最新可用）
-                suffix = '.SH' if stock_code.startswith('6') else '.SZ'
-                df_ts = pro.daily_basic(
-                    ts_code=stock_code + suffix,
-                    fields='ts_code,trade_date,close,change,pct_chg,vol,amount,turnover_rate,pe,pb,total_mv,circ_mv'
-                )
-                if not df_ts.empty:
-                    # 转换为 AKShare 类似的 DataFrame 结构
-                    df = pd.DataFrame([{
-                        '代码': stock_code,
-                        '名称': stock_code,  # Tushare 无名称，可后续补充
-                        '最新价': df_ts.iloc[0]['close'],
-                        '涨跌幅': df_ts.iloc[0]['pct_chg'],
-                        '涨跌额': df_ts.iloc[0]['change'],
-                        '量比': 0.0,          # Tushare daily_basic 无量比，设默认值
-                        '换手率': df_ts.iloc[0]['turnover_rate'],
-                        '振幅': 0.0,          # 无振幅
-                        '市盈率-动态': df_ts.iloc[0]['pe'],
-                        '市净率': df_ts.iloc[0]['pb'],
-                        '总市值': df_ts.iloc[0]['total_mv'],
-                        '流通市值': df_ts.iloc[0]['circ_mv'],
-                    }])
-                    logger.info(f"[Tushare] 实时行情成功: {stock_code}")
+                logger.info(f"[Fallback] 切换到新浪财经 ak.stock_zh_a_spot() 获取实时行情")
+                self._enforce_rate_limit()  # 继续限流保护
+                self._set_random_user_agent()
+                api_start = time.time()
+                df = ak.stock_zh_a_spot()
+                api_elapsed = time.time() - api_start
+                if not df.empty:
+                    logger.info(f"[新浪] 实时行情成功: 返回 {len(df)} 只股票, 耗时 {api_elapsed:.2f}s")
                 else:
-                    logger.warning(f"[Tushare] 返回空数据: {stock_code}")
+                    logger.warning("[新浪] 返回空数据")
             except Exception as e:
-                logger.error(f"[Tushare fallback 失败] {e}")
+                logger.error(f"[新浪 fallback 失败] {e}")
 
-        # 如果两种源都失败，返回 None
+        # 如果两种源都失败
         if df is None or df.empty:
-            logger.warning(f"[实时行情] 最终为空，跳过 {stock_code} (尝试来源: AKShare + Tushare)")
+            logger.warning(f"[实时行情] 最终为空，跳过 {stock_code} (尝试来源: AKShare + 新浪)")
             return None
 
-        # 查找指定股票（兼容两种来源的列名）
+        # 查找指定股票（新浪列名略不同，需要兼容映射）
+        # 新浪列名示例：'代码', '名称', '最新价', '涨跌幅', '涨跌额', '成交量', '成交额', '换手率', '振幅' 等
         row = df[df['代码'] == stock_code]
         if row.empty:
             logger.warning(f"[API返回] 未找到股票 {stock_code} 的实时行情")
@@ -659,21 +639,21 @@ class AkshareFetcher(BaseFetcher):
             price=self._safe_float(row.get('最新价')),
             change_pct=self._safe_float(row.get('涨跌幅')),
             change_amount=self._safe_float(row.get('涨跌额')),
-            volume_ratio=self._safe_float(row.get('量比')),
+            volume_ratio=0.0,  # 新浪无量比，设默认 0
             turnover_rate=self._safe_float(row.get('换手率')),
             amplitude=self._safe_float(row.get('振幅')),
-            pe_ratio=self._safe_float(row.get('市盈率-动态')),
-            pb_ratio=self._safe_float(row.get('市净率')),
-            total_mv=self._safe_float(row.get('总市值')),
-            circ_mv=self._safe_float(row.get('流通市值')),
-            change_60d=self._safe_float(row.get('60日涨跌幅', 0.0)),
-            high_52w=self._safe_float(row.get('52周最高', 0.0)),
-            low_52w=self._safe_float(row.get('52周最低', 0.0)),
+            pe_ratio=0.0,      # 新浪无 PE，设默认 0
+            pb_ratio=0.0,      # 新浪无 PB，设默认 0
+            total_mv=0.0,      # 新浪无总市值
+            circ_mv=0.0,       # 新浪无流通市值
+            change_60d=0.0,
+            high_52w=0.0,
+            low_52w=0.0,
         )
 
         logger.info(f"[{source} 实时行情] {stock_code} {quote.name}: 价格={quote.price}, "
-                    f"涨跌={quote.change_pct}%, 量比={quote.volume_ratio}, 换手率={quote.turnover_rate}%, "
-                    f"PE={quote.pe_ratio}, PB={quote.pb_ratio}")
+                    f"涨跌={quote.change_pct}%, 换手率={quote.turnover_rate}%, "
+                    f"振幅={quote.amplitude}% (PE/PB/量比缺失，使用默认值)")
         return quote
     
     def _get_hk_realtime_quote(self, stock_code: str) -> Optional[RealtimeQuote]:
