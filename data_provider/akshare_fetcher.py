@@ -254,6 +254,13 @@ class AkshareFetcher(BaseFetcher):
     
     name = "AkshareFetcher"
     priority = 1
+
+    # 全局缓存：类变量，所有实例共享
+    _spot_cache = {
+        'data': None,
+        'timestamp': 0,
+        'ttl': 300  # 缓存 5 分钟（300 秒），盘中足够
+    }
     
     def __init__(self, sleep_min: float = 2.0, sleep_max: float = 5.0):
         """
