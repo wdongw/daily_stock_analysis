@@ -17,13 +17,56 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 import akshare as ak
+import yfinance as yf
 import pandas as pd
 
 from config import get_config
 from search_service import SearchService
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
+def get_index_quotes() -> Dict[str, Dict]:
+    """
+    使用 Yfinance 获取主要指数实时行情（稳定 fallback）
+    支持上证、深证、创业板、科创50等
+    """
+    index_codes = {
+        '上证指数': '000001.SS',
+        '深证成指': '399001.SZ',
+        '创业板指': '399006.SZ',
+        '科创50': '000688.SS',
+        '沪深300': '000300.SS',
+        '上证50': '000016.SS',
+        '中证500': '000905.SZ',
+        '北证50': '899001.BJ'  # 北交所可能支持有限
+    }
+    
+    quotes = {}
+    for name, code in index_codes.items():
+        try:
+            ticker = yf.Ticker(code)
+            info = ticker.info
+            hist = ticker.history(period="1d")  # 当日数据
+            
+            if not hist.empty:
+                today = hist.iloc[-1]
+                quotes[name] = {
+                    'price': round(today['Close'], 2),
+                    'change_pct': round(info.get('regularMarketChangePercent', today['Close'] / today['Open'] - 1) * 100, 2),
+                    'change_amount': round(info.get('regularMarketChange', today['Close'] - today['Open']), 2),
+                    'volume': int(today['Volume']),
+                    'high': round(today['High'], 2),
+                    'low': round(today['Low'], 2),
+                    'source': 'Yfinance'
+                }
+                logger.info(f"[Yfinance] 获取 {name} 成功: 价格={quotes[name]['price']}, 涨跌幅={quotes[name]['change_pct']}%")
+            else:
+                logger.warning(f"[Yfinance] {name} 无当日数据")
+        except Exception as e:
+            logger.warning(f"[Yfinance {name}] 失败: {str(e)[:100]}")
+    
+    return quotes
 
 @dataclass
 class MarketIndex:
@@ -150,45 +193,72 @@ class MarketAnalyzer:
         """获取主要指数实时行情"""
         indices = []
         
-        try:
-            logger.info("[大盘] 获取主要指数实时行情...")
-            
-            # 使用 akshare 获取指数行情（新浪财经接口，包含深市指数）
-            df = self._call_akshare_with_retry(ak.stock_zh_index_spot_sina, "指数行情", attempts=2)
-            
-            if df is not None and not df.empty:
-                for code, name in self.MAIN_INDICES.items():
-                    # 查找对应指数
-                    row = df[df['代码'] == code]
-                    if row.empty:
-                        # 尝试带前缀查找
-                        row = df[df['代码'].str.contains(code)]
-                    
-                    if not row.empty:
-                        row = row.iloc[0]
-                        index = MarketIndex(
-                            code=code,
-                            name=name,
-                            current=float(row.get('最新价', 0) or 0),
-                            change=float(row.get('涨跌额', 0) or 0),
-                            change_pct=float(row.get('涨跌幅', 0) or 0),
-                            open=float(row.get('今开', 0) or 0),
-                            high=float(row.get('最高', 0) or 0),
-                            low=float(row.get('最低', 0) or 0),
-                            prev_close=float(row.get('昨收', 0) or 0),
-                            volume=float(row.get('成交量', 0) or 0),
-                            amount=float(row.get('成交额', 0) or 0),
-                        )
-                        # 计算振幅
-                        if index.prev_close > 0:
-                            index.amplitude = (index.high - index.low) / index.prev_close * 100
-                        indices.append(index)
-                        
-                logger.info(f"[大盘] 获取到 {len(indices)} 个指数行情")
-                
-        except Exception as e:
-            logger.error(f"[大盘] 获取指数行情失败: {e}")
+        #try:
+        logger.info("[大盘] 获取主要指数实时行情...")
         
+        # 使用 akshare 获取指数行情（新浪财经接口，包含深市指数）
+        df = self._call_akshare_with_retry(ak.stock_zh_index_spot_sina, "指数行情", attempts=2)
+        
+        if df is not None and not df.empty:
+            for code, name in self.MAIN_INDICES.items():
+                # 查找对应指数
+                row = df[df['代码'] == code]
+                if row.empty:
+                    # 尝试带前缀查找
+                    row = df[df['代码'].str.contains(code)]
+                
+                if not row.empty:
+                    row = row.iloc[0]
+                    index = MarketIndex(
+                        code=code,
+                        name=name,
+                        current=float(row.get('最新价', 0) or 0),
+                        change=float(row.get('涨跌额', 0) or 0),
+                        change_pct=float(row.get('涨跌幅', 0) or 0),
+                        open=float(row.get('今开', 0) or 0),
+                        high=float(row.get('最高', 0) or 0),
+                        low=float(row.get('最低', 0) or 0),
+                        prev_close=float(row.get('昨收', 0) or 0),
+                        volume=float(row.get('成交量', 0) or 0),
+                        amount=float(row.get('成交额', 0) or 0),
+                    )
+                    # 计算振幅
+                    if index.prev_close > 0:
+                        index.amplitude = (index.high - index.low) / index.prev_close * 100
+                    indices.append(index)
+            logger.info(f"[大盘] 获取到 {len(indices)} 个指数行情")
+
+        # 如果 akshare 失败或数据不全，用 Yfinance 补齐
+        if len(indices) < len(self.MAIN_INDICES):
+            logger.warning("[大盘] akshare 指数数据不完整或失败 → 使用 Yfinance 补齐")
+            yf_quotes = get_index_quotes()  # 直接调用全局函数
+    
+            for code, name in self.MAIN_INDICES.items():
+                # 如果 akshare 已有数据，就跳过
+                if any(idx.code == code for idx in indices):
+                    continue
+                    
+                yf_data = yf_quotes.get(name)
+                if yf_data:
+                    index = MarketIndex(
+                        code=code,
+                        name=name,
+                        current=yf_data['price'],
+                        change=yf_data['change_amount'],
+                        change_pct=yf_data['change_pct'],
+                        high=yf_data['high'],
+                        low=yf_data['low'],
+                        volume=yf_data['volume'],
+                        # open/low 等其他字段如果需要可以再扩展
+                    )
+                    indices.append(index)
+                    logger.info(f"[Yfinance 补齐] {name}: {index.current:.2f} ({index.change_pct:+.2f}%)")
+                    
+        #except Exception as e:
+        #    logger.error(f"[大盘] 获取指数行情失败: {e}")
+        if not indices:
+            logger.error("[大盘] 所有指数源均失败")
+            
         return indices
     
     def _get_market_statistics(self, overview: MarketOverview):
