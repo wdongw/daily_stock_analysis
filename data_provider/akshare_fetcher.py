@@ -610,7 +610,7 @@ class AkshareFetcher(BaseFetcher):
                     logger.info(f"[新浪 fallback 尝试 {attempt}/3]")
                     self._enforce_rate_limit()
                     self._set_random_user_agent()
-                    headers = {'User-Agent': random.choice(USER_AGENTS)}
+                    headers = {'User-Agent': random.choice(USER_AGENTS),'Referer': 'http://finance.sina.com.cn'}
                     # 强制用 requests 带 headers（akshare 内部可能没传）
                     import requests
                     url = "http://hq.sinajs.cn/list=sh" + stock_code if stock_code.startswith('6') else "http://hq.sinajs.cn/list=sz" + stock_code
