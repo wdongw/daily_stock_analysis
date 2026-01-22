@@ -666,10 +666,6 @@ class AkshareFetcher(BaseFetcher):
                     f"涨跌={quote.change_pct}%, 量比={quote.volume_ratio}, 换手率={quote.turnover_rate}%, "
                     f"PE={quote.pe_ratio}, PB={quote.pb_ratio}")
         return quote
-            
-        except Exception as e:
-            logger.error(f"[API错误] 获取 ETF {stock_code} 实时行情失败: {e}")
-            return None
     
     def _get_hk_realtime_quote(self, stock_code: str) -> Optional[RealtimeQuote]:
         """
