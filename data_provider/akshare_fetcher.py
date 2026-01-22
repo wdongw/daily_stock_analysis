@@ -613,7 +613,7 @@ class AkshareFetcher(BaseFetcher):
                     headers = {'User-Agent': random.choice(USER_AGENTS)}
                     # 强制用 requests 带 headers（akshare 内部可能没传）
                     import requests
-                    url = "http://hq.sinajs.cn/list=sh" + stock_code if stock_code.startswith('6') else "sz" + stock_code
+                    url = "http://hq.sinajs.cn/list=sh" + stock_code if stock_code.startswith('6') else "http://hq.sinajs.cn/list=sz" + stock_code
                     resp = requests.get(url, headers=headers, timeout=10)
                     if resp.status_code == 200 and '<' not in resp.text[:10]:
                         # 新浪返回格式: var hq_str_sh600000="浦发银行,..."
