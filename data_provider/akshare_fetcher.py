@@ -262,7 +262,7 @@ class AkshareFetcher(BaseFetcher):
         'ttl': 300  # 缓存 5 分钟（300 秒），盘中足够
     }
     
-    def __init__(self, sleep_min: float = 2.0, sleep_max: float = 5.0):
+    def __init__(self, sleep_min: float = 5.0, sleep_max: float = 30.0):
         """
         初始化 AkshareFetcher
         
@@ -593,24 +593,42 @@ class AkshareFetcher(BaseFetcher):
         优先 AKShare 东财 → 失败则用 ak.stock_zh_a_spot() 新浪源
         """
         import akshare as ak
+        import time
 
         df = None
-        source = "AKShare"
+        source = "AKShare 全市场缓存"
 
         # 步骤1: 优先尝试 AKShare（东方财富）
-        try:
-            self._enforce_rate_limit()
-            self._set_random_user_agent()
-            logger.info(f"[API调用] ak.stock_zh_a_spot_em() 获取A股实时行情... (来源: {source})")
-            api_start = time.time()
-            df = ak.stock_zh_a_spot_em()
-            api_elapsed = time.time() - api_start
-            logger.info(f"[API返回] ak.stock_zh_a_spot_em 成功: 返回 {len(df)} 只股票, 耗时 {api_elapsed:.2f}s")
-        except Exception as e:
-            logger.warning(f"[AKShare 东财失败] {e}")
+        # 检查缓存是否有效
+        current_time = time.time()
+        if (self._spot_cache['data'] is not None and
+            current_time - self._spot_cache['timestamp'] < self._spot_cache['ttl']):
+            df = self._spot_cache['data']
+            logger.debug("[缓存命中] 使用已缓存的全市场 spot 数据")
+        else:
+            # 缓存失效或首次 → 拉取全市场
+            for attempt in range(1, 4):
+                try:
+                    logger.info(f"[全市场拉取] 尝试 {attempt}/3")
+                    self._enforce_rate_limit()
+                    self._set_random_user_agent()
+                    api_start = time.time()
+                    df_full = ak.stock_zh_a_spot_em()
+                    api_elapsed = time.time() - api_start
+                    logger.info(f"[全市场] 成功拉取 {len(df_full)} 只股票, 耗时 {api_elapsed:.2f}s")
 
+                    # 更新类缓存
+                    self._spot_cache['data'] = df_full
+                    self._spot_cache['timestamp'] = current_time
+                    df = df_full
+                    break
+                except Exception as e:
+                    logger.warning(f"[全市场 尝试 {attempt} 失败] {str(e)[:100]}")
+                    time.sleep(10)  # 失败后等 10 秒再试
+                    
         # 步骤2: AKShare 失败 → fallback 到新浪财经（ak.stock_zh_a_spot）
         if (df is None or df.empty):
+            logger.warning("[全市场实时] 拉取失败，尝试其他 fallback")
             source = "新浪财经 (fallback)"
             for attempt in range(1, 4):  # 重试 3 次
                 try:
@@ -645,6 +663,34 @@ class AkshareFetcher(BaseFetcher):
                     logger.warning(f"[新浪 尝试 {attempt} 失败] {e}")
             else:
                 logger.error("[新浪 fallback 全部失败]")
+        else:
+            # 从缓存 df 中找个股
+            row = df[df['代码'] == stock_code]
+            if row.empty:
+                logger.warning(f"[缓存中] 未找到 {stock_code}")
+            else:
+                row = row.iloc[0]
+                quote = RealtimeQuote(
+                    code=stock_code,
+                    name=str(row.get('名称', '')),
+                    price=self._safe_float(row.get('最新价')),
+                    change_pct=self._safe_float(row.get('涨跌幅')),
+                    change_amount=self._safe_float(row.get('涨跌额')),
+                    volume_ratio=self._safe_float(row.get('量比', 0.0)),
+                    turnover_rate=self._safe_float(row.get('换手率', 0.0)),
+                    amplitude=self._safe_float(row.get('振幅', 0.0)),
+                    pe_ratio=0.0,       # 全市场 spot 无 PE/PB
+                    pb_ratio=0.0,
+                    total_mv=0.0,
+                    circ_mv=0.0,
+                    change_60d=0.0,
+                    high_52w=0.0,
+                    low_52w=0.0,
+                )
+                logger.info(f"[全市场缓存] {stock_code} {quote.name}: 价格={quote.price}, "
+                            f"量比={quote.volume_ratio:.2f}, 换手率={quote.turnover_rate:.2f}%")
+                return quote
+                
                 
         # 如果两种源都失败
         if df is None or df.empty:
