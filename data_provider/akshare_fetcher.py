@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 
 import pandas as pd
+import os
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -265,7 +266,15 @@ class AkshareFetcher(BaseFetcher):
         self.sleep_min = sleep_min
         self.sleep_max = sleep_max
         self._last_request_time: Optional[float] = None
-    
+        
+    def _safe_float(self, val, default=0.0):
+        try:
+            if pd.isna(val):
+                return default
+            return float(val)
+        except (ValueError, TypeError):
+            return default
+            
     def _set_random_user_agent(self) -> None:
         """
         设置随机 User-Agent
