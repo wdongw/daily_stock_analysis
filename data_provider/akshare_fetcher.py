@@ -27,6 +27,7 @@ from typing import Optional, Dict, Any
 
 import pandas as pd
 import os
+#import threading
 from tenacity import (
     retry,
     stop_after_attempt,
@@ -183,11 +184,11 @@ USER_AGENTS = [
 
 
 # 缓存实时行情数据（避免重复请求）
-_realtime_cache: Dict[str, Any] = {
-    'data': None,
-    'timestamp': 0,
-    'ttl': 60  # 60秒缓存有效期
-}
+#_realtime_cache: Dict[str, Any] = {
+#    'data': None,
+#    'timestamp': 0,
+#    'ttl': 60  # 60秒缓存有效期
+#}
 
 # ETF 实时行情缓存
 _etf_realtime_cache: Dict[str, Any] = {
@@ -261,6 +262,9 @@ class AkshareFetcher(BaseFetcher):
         'timestamp': 0,
         'ttl': 300  # 缓存 5 分钟（300 秒），盘中足够
     }
+
+    # 加一个类锁，保护缓存更新
+    #_cache_lock = threading.Lock()
     
     def __init__(self, sleep_min: float = 5.0, sleep_max: float = 30.0):
         """
