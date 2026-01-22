@@ -572,193 +572,100 @@ class AkshareFetcher(BaseFetcher):
             return self._get_stock_realtime_quote(stock_code)
     
     def _get_stock_realtime_quote(self, stock_code: str) -> Optional[RealtimeQuote]:
-        """
-        获取普通 A 股实时行情数据
-        
-        数据来源：ak.stock_zh_a_spot_em()
-        包含：量比、换手率、市盈率、市净率、总市值、流通市值等
-        """
+    """
+    获取普通 A 股实时行情数据（增强版：添加 Tushare fallback）
+    """
         import akshare as ak
-        
+        import tushare as ts
+        from config import get_config  # 确保能读取 TUSHARE_TOKEN
+
+        config = get_config()
+        tushare_token = config.tushare_token or os.getenv("TUSHARE_TOKEN")
+
+        df = None
+        source = "AKShare"
+
+    # 步骤1: 优先尝试 AKShare（东方财富）
         try:
-            # 检查缓存
-            current_time = time.time()
-            if (_realtime_cache['data'] is not None and 
-                current_time - _realtime_cache['timestamp'] < _realtime_cache['ttl']):
-                df = _realtime_cache['data']
-                logger.debug(f"[缓存命中] 使用缓存的A股实时行情数据")
-            else:
-                last_error: Optional[Exception] = None
-                df = None
-                for attempt in range(1, 3):
-                    try:
-                        # 防封禁策略
-                        self._set_random_user_agent()
-                        self._enforce_rate_limit()
-
-                        logger.info(f"[API调用] ak.stock_zh_a_spot_em() 获取A股实时行情... (attempt {attempt}/2)")
-                        import time as _time
-                        api_start = _time.time()
-
-                        df = ak.stock_zh_a_spot_em()
-
-                        api_elapsed = _time.time() - api_start
-                        logger.info(f"[API返回] ak.stock_zh_a_spot_em 成功: 返回 {len(df)} 只股票, 耗时 {api_elapsed:.2f}s")
-                        break
-                    except Exception as e:
-                        last_error = e
-                        logger.warning(f"[API错误] ak.stock_zh_a_spot_em 获取失败 (attempt {attempt}/2): {e}")
-                        time.sleep(min(2 ** attempt, 5))
-
-                # 更新缓存：成功缓存数据；失败也缓存空数据，避免同一轮任务对同一接口反复请求
-                if df is None:
-                    logger.error(f"[API错误] ak.stock_zh_a_spot_em 最终失败: {last_error}")
-                    df = pd.DataFrame()
-                _realtime_cache['data'] = df
-                _realtime_cache['timestamp'] = current_time
-
-            if df is None or df.empty:
-                logger.warning(f"[实时行情] A股实时行情数据为空，跳过 {stock_code}")
-                return None
-            
-            # 查找指定股票
-            row = df[df['代码'] == stock_code]
-            if row.empty:
-                logger.warning(f"[API返回] 未找到股票 {stock_code} 的实时行情")
-                return None
-            
-            row = row.iloc[0]
-            
-            # 安全获取字段值
-            def safe_float(val, default=0.0):
-                try:
-                    if pd.isna(val):
-                        return default
-                    return float(val)
-                except:
-                    return default
-            
-            quote = RealtimeQuote(
-                code=stock_code,
-                name=str(row.get('名称', '')),
-                price=safe_float(row.get('最新价')),
-                change_pct=safe_float(row.get('涨跌幅')),
-                change_amount=safe_float(row.get('涨跌额')),
-                volume_ratio=safe_float(row.get('量比')),
-                turnover_rate=safe_float(row.get('换手率')),
-                amplitude=safe_float(row.get('振幅')),
-                pe_ratio=safe_float(row.get('市盈率-动态')),
-                pb_ratio=safe_float(row.get('市净率')),
-                total_mv=safe_float(row.get('总市值')),
-                circ_mv=safe_float(row.get('流通市值')),
-                change_60d=safe_float(row.get('60日涨跌幅')),
-                high_52w=safe_float(row.get('52周最高')),
-                low_52w=safe_float(row.get('52周最低')),
-            )
-            
-            logger.info(f"[实时行情] {stock_code} {quote.name}: 价格={quote.price}, 涨跌={quote.change_pct}%, "
-                       f"量比={quote.volume_ratio}, 换手率={quote.turnover_rate}%, "
-                       f"PE={quote.pe_ratio}, PB={quote.pb_ratio}")
-            return quote
-            
+            self._enforce_rate_limit()
+            self._set_random_user_agent()
+            logger.info(f"[API调用] ak.stock_zh_a_spot_em() 获取A股实时行情... (来源: {source})")
+            api_start = time.time()
+            df = ak.stock_zh_a_spot_em()
+            api_elapsed = time.time() - api_start
+            logger.info(f"[API返回] ak.stock_zh_a_spot_em 成功: 返回 {len(df)} 只股票, 耗时 {api_elapsed:.2f}s")
         except Exception as e:
-            logger.error(f"[API错误] 获取 {stock_code} 实时行情失败: {e}")
+            logger.warning(f"[AKShare 实时行情失败] {e}")
+
+    # 步骤2: 如果 AKShare 失败，且有 Tushare Token，则 fallback
+        if (df is None or df.empty) and tushare_token:
+            source = "Tushare (fallback)"
+            try:
+                logger.info(f"[Fallback] 切换到 Tushare 获取实时行情")
+                pro = ts.pro_api(tushare_token)
+                # Tushare daily_basic：提供最新交易日的估值和换手率（非严格盘中实时，但最新可用）
+                suffix = '.SH' if stock_code.startswith('6') else '.SZ'
+                df_ts = pro.daily_basic(
+                    ts_code=stock_code + suffix,
+                    fields='ts_code,trade_date,close,change,pct_chg,vol,amount,turnover_rate,pe,pb,total_mv,circ_mv'
+                )
+                if not df_ts.empty:
+                    # 转换为 AKShare 类似的 DataFrame 结构
+                    df = pd.DataFrame([{
+                        '代码': stock_code,
+                        '名称': stock_code,  # Tushare 无名称，可后续补充
+                        '最新价': df_ts.iloc[0]['close'],
+                        '涨跌幅': df_ts.iloc[0]['pct_chg'],
+                        '涨跌额': df_ts.iloc[0]['change'],
+                        '量比': 0.0,          # Tushare daily_basic 无量比，设默认值
+                        '换手率': df_ts.iloc[0]['turnover_rate'],
+                        '振幅': 0.0,          # 无振幅
+                        '市盈率-动态': df_ts.iloc[0]['pe'],
+                        '市净率': df_ts.iloc[0]['pb'],
+                        '总市值': df_ts.iloc[0]['total_mv'],
+                        '流通市值': df_ts.iloc[0]['circ_mv'],
+                    }])
+                    logger.info(f"[Tushare] 实时行情成功: {stock_code}")
+                else:
+                    logger.warning(f"[Tushare] 返回空数据: {stock_code}")
+            except Exception as e:
+                logger.error(f"[Tushare fallback 失败] {e}")
+
+        # 如果两种源都失败，返回 None
+        if df is None or df.empty:
+            logger.warning(f"[实时行情] 最终为空，跳过 {stock_code} (尝试来源: AKShare + Tushare)")
             return None
-    
-    def _get_etf_realtime_quote(self, stock_code: str) -> Optional[RealtimeQuote]:
-        """
-        获取 ETF 基金实时行情数据
-        
-        数据来源：ak.fund_etf_spot_em()
-        包含：最新价、涨跌幅、成交量、成交额、换手率等
-        
-        Args:
-            stock_code: ETF 代码
-            
-        Returns:
-            RealtimeQuote 对象，获取失败返回 None
-        """
-        import akshare as ak
-        
-        try:
-            # 检查缓存
-            current_time = time.time()
-            if (_etf_realtime_cache['data'] is not None and 
-                current_time - _etf_realtime_cache['timestamp'] < _etf_realtime_cache['ttl']):
-                df = _etf_realtime_cache['data']
-                logger.debug(f"[缓存命中] 使用缓存的ETF实时行情数据")
-            else:
-                last_error: Optional[Exception] = None
-                df = None
-                for attempt in range(1, 3):
-                    try:
-                        # 防封禁策略
-                        self._set_random_user_agent()
-                        self._enforce_rate_limit()
 
-                        logger.info(f"[API调用] ak.fund_etf_spot_em() 获取ETF实时行情... (attempt {attempt}/2)")
-                        import time as _time
-                        api_start = _time.time()
+        # 查找指定股票（兼容两种来源的列名）
+        row = df[df['代码'] == stock_code]
+        if row.empty:
+            logger.warning(f"[API返回] 未找到股票 {stock_code} 的实时行情")
+            return None
 
-                        df = ak.fund_etf_spot_em()
+        row = row.iloc[0]
 
-                        api_elapsed = _time.time() - api_start
-                        logger.info(f"[API返回] ak.fund_etf_spot_em 成功: 返回 {len(df)} 只ETF, 耗时 {api_elapsed:.2f}s")
-                        break
-                    except Exception as e:
-                        last_error = e
-                        logger.warning(f"[API错误] ak.fund_etf_spot_em 获取失败 (attempt {attempt}/2): {e}")
-                        time.sleep(min(2 ** attempt, 5))
+        quote = RealtimeQuote(
+            code=stock_code,
+            name=str(row.get('名称', '')),
+            price=self._safe_float(row.get('最新价')),
+            change_pct=self._safe_float(row.get('涨跌幅')),
+            change_amount=self._safe_float(row.get('涨跌额')),
+            volume_ratio=self._safe_float(row.get('量比')),
+            turnover_rate=self._safe_float(row.get('换手率')),
+            amplitude=self._safe_float(row.get('振幅')),
+            pe_ratio=self._safe_float(row.get('市盈率-动态')),
+            pb_ratio=self._safe_float(row.get('市净率')),
+            total_mv=self._safe_float(row.get('总市值')),
+            circ_mv=self._safe_float(row.get('流通市值')),
+            change_60d=self._safe_float(row.get('60日涨跌幅', 0.0)),
+            high_52w=self._safe_float(row.get('52周最高', 0.0)),
+            low_52w=self._safe_float(row.get('52周最低', 0.0)),
+        )
 
-                if df is None:
-                    logger.error(f"[API错误] ak.fund_etf_spot_em 最终失败: {last_error}")
-                    df = pd.DataFrame()
-                _etf_realtime_cache['data'] = df
-                _etf_realtime_cache['timestamp'] = current_time
-
-            if df is None or df.empty:
-                logger.warning(f"[实时行情] ETF实时行情数据为空，跳过 {stock_code}")
-                return None
-            
-            # 查找指定 ETF
-            row = df[df['代码'] == stock_code]
-            if row.empty:
-                logger.warning(f"[API返回] 未找到 ETF {stock_code} 的实时行情")
-                return None
-            
-            row = row.iloc[0]
-            
-            # 安全获取字段值
-            def safe_float(val, default=0.0):
-                try:
-                    if pd.isna(val):
-                        return default
-                    return float(val)
-                except:
-                    return default
-            
-            # ETF 行情数据构建（部分字段 ETF 可能不支持，使用默认值）
-            quote = RealtimeQuote(
-                code=stock_code,
-                name=str(row.get('名称', '')),
-                price=safe_float(row.get('最新价')),
-                change_pct=safe_float(row.get('涨跌幅')),
-                change_amount=safe_float(row.get('涨跌额')),
-                volume_ratio=safe_float(row.get('量比', 0)),  # ETF 可能无量比
-                turnover_rate=safe_float(row.get('换手率')),
-                amplitude=safe_float(row.get('振幅')),
-                pe_ratio=0.0,  # ETF 通常无市盈率
-                pb_ratio=0.0,  # ETF 通常无市净率
-                total_mv=safe_float(row.get('总市值', 0)),
-                circ_mv=safe_float(row.get('流通市值', 0)),
-                change_60d=0.0,  # ETF 接口可能不提供
-                high_52w=safe_float(row.get('52周最高', 0)),
-                low_52w=safe_float(row.get('52周最低', 0)),
-            )
-            
-            logger.info(f"[ETF实时行情] {stock_code} {quote.name}: 价格={quote.price}, 涨跌={quote.change_pct}%, "
-                       f"换手率={quote.turnover_rate}%")
-            return quote
+        logger.info(f"[{source} 实时行情] {stock_code} {quote.name}: 价格={quote.price}, "
+                    f"涨跌={quote.change_pct}%, 量比={quote.volume_ratio}, 换手率={quote.turnover_rate}%, "
+                    f"PE={quote.pe_ratio}, PB={quote.pb_ratio}")
+        return quote
             
         except Exception as e:
             logger.error(f"[API错误] 获取 ETF {stock_code} 实时行情失败: {e}")
