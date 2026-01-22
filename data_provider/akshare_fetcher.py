@@ -572,9 +572,9 @@ class AkshareFetcher(BaseFetcher):
             return self._get_stock_realtime_quote(stock_code)
     
     def _get_stock_realtime_quote(self, stock_code: str) -> Optional[RealtimeQuote]:
-    """
-    获取普通 A 股实时行情数据（增强版：添加 Tushare fallback）
-    """
+        """
+        获取普通 A 股实时行情数据（增强版：添加 Tushare fallback）
+        """
         import akshare as ak
         import tushare as ts
         from config import get_config  # 确保能读取 TUSHARE_TOKEN
@@ -585,7 +585,7 @@ class AkshareFetcher(BaseFetcher):
         df = None
         source = "AKShare"
 
-    # 步骤1: 优先尝试 AKShare（东方财富）
+        # 步骤1: 优先尝试 AKShare（东方财富）
         try:
             self._enforce_rate_limit()
             self._set_random_user_agent()
@@ -597,7 +597,7 @@ class AkshareFetcher(BaseFetcher):
         except Exception as e:
             logger.warning(f"[AKShare 实时行情失败] {e}")
 
-    # 步骤2: 如果 AKShare 失败，且有 Tushare Token，则 fallback
+        # 步骤2: 如果 AKShare 失败，且有 Tushare Token，则 fallback
         if (df is None or df.empty) and tushare_token:
             source = "Tushare (fallback)"
             try:
