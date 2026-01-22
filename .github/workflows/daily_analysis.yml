@@ -89,7 +89,7 @@ jobs:
           # 其他配置
           LOG_LEVEL: INFO
           DATA_DAYS: 60
-          MAX_CONCURRENT: 3
+          MAX_CONCURRENT: 1
         run: |
           # 判断运行模式
           MODE="${{ github.event.inputs.mode || 'full' }}"
