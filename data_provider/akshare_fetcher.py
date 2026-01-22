@@ -605,20 +605,40 @@ class AkshareFetcher(BaseFetcher):
         # 步骤2: AKShare 失败 → fallback 到新浪财经（ak.stock_zh_a_spot）
         if (df is None or df.empty):
             source = "新浪财经 (fallback)"
-            try:
-                logger.info(f"[Fallback] 切换到新浪财经 ak.stock_zh_a_spot() 获取实时行情")
-                self._enforce_rate_limit()  # 继续限流保护
-                self._set_random_user_agent()
-                api_start = time.time()
-                df = ak.stock_zh_a_spot()
-                api_elapsed = time.time() - api_start
-                if not df.empty:
-                    logger.info(f"[新浪] 实时行情成功: 返回 {len(df)} 只股票, 耗时 {api_elapsed:.2f}s")
-                else:
-                    logger.warning("[新浪] 返回空数据")
-            except Exception as e:
-                logger.error(f"[新浪 fallback 失败] {e}")
-
+            for attempt in range(1, 4):  # 重试 3 次
+                try:
+                    logger.info(f"[新浪 fallback 尝试 {attempt}/3]")
+                    self._enforce_rate_limit()
+                    self._set_random_user_agent()
+                    headers = {'User-Agent': random.choice(USER_AGENTS)}
+                    # 强制用 requests 带 headers（akshare 内部可能没传）
+                    import requests
+                    url = "http://hq.sinajs.cn/list=sh" + stock_code if stock_code.startswith('6') else "sz" + stock_code
+                    resp = requests.get(url, headers=headers, timeout=10)
+                    if resp.status_code == 200 and '<' not in resp.text[:10]:
+                        # 新浪返回格式: var hq_str_sh600000="浦发银行,..."
+                        # 简单解析（akshare 内部用 eval，这里手动试）
+                        data_str = resp.text.split('=')[-1].strip('";\n')
+                        fields = data_str.split(',')
+                        if len(fields) > 30:
+                            df = pd.DataFrame([{
+                                '代码': stock_code,
+                                '名称': fields[0],
+                                '最新价': float(fields[3]),
+                                '涨跌幅': float(fields[3]) / float(fields[2]) - 1 if float(fields[2]) > 0 else 0,
+                                '涨跌额': float(fields[3]) - float(fields[2]),
+                                '换手率': 0.0,  # 新浪单股无换手率
+                                '振幅': float(fields[8]) if len(fields) > 8 else 0.0,
+                            }])
+                            logger.info(f"[新浪手动解析] 成功: {stock_code}")
+                            break
+                    else:
+                        logger.warning(f"[新浪] 返回非数据: {resp.text[:100]}")
+                except Exception as e:
+                    logger.warning(f"[新浪 尝试 {attempt} 失败] {e}")
+            else:
+                logger.error("[新浪 fallback 全部失败]")
+                
         # 如果两种源都失败
         if df is None or df.empty:
             logger.warning(f"[实时行情] 最终为空，跳过 {stock_code} (尝试来源: AKShare + 新浪)")
